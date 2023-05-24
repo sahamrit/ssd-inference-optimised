@@ -15,10 +15,6 @@ logger = logging.getLogger(__name__)
 # global setting
 videoformat = "RGBA"
 
-pipeline = None
-bus = None
-message = None
-
 # initialize GStreamer
 Gst.init(sys.argv[1:])
 
@@ -26,8 +22,8 @@ Gst.init(sys.argv[1:])
 pipeline = Gst.parse_launch(
     f"filesrc location=media/in.mp4 ! \
      decodebin ! \
-     videoconvert ! \
-     video/x-raw, format = {videoformat} ! \
+     nvvideoconvert ! \
+     video/x-raw(memory:NVMM), format = {videoformat} ! \
      fakesink"
 )
 
@@ -52,5 +48,8 @@ if msg:
         # This should not happen as we only asked for ERRORs and EOS
         logger.error("Unexpected message received.")
 
+open(f"logs/gst_baseline.dot", "w").write(
+    Gst.debug_bin_to_dot_data(pipeline, Gst.DebugGraphDetails.ALL)
+)
 # free resources
 pipeline.set_state(Gst.State.NULL)

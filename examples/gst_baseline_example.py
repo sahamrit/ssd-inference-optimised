@@ -14,13 +14,14 @@ logger = logging.getLogger(__name__)
 
 # global setting
 videoformat = "RGBA"
-
+input_path = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/media/in.mp4"
+logs_dir = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/logs"
 # initialize GStreamer
 Gst.init(sys.argv[1:])
 
 # build the pipeline
 pipeline = Gst.parse_launch(
-    f"filesrc location=media/in.mp4 ! \
+    f"filesrc location={input_path} ! \
      decodebin ! \
      nvvideoconvert ! \
      video/x-raw(memory:NVMM), format = {videoformat} ! \
@@ -48,7 +49,7 @@ if msg:
         # This should not happen as we only asked for ERRORs and EOS
         logger.error("Unexpected message received.")
 
-open(f"logs/gst_baseline.dot", "w").write(
+open(f"{logs_dir}/gst_baseline.dot", "w").write(
     Gst.debug_bin_to_dot_data(pipeline, Gst.DebugGraphDetails.ALL)
 )
 # free resources

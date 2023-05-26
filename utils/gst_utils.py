@@ -6,9 +6,6 @@ gi.require_version("Gst", "1.0")
 
 from gi.repository import Gst
 
-logging.basicConfig(
-    level=logging.DEBUG, format="[%(name)s] [%(levelname)8s] - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 
@@ -26,10 +23,12 @@ def get_buffer_size(caps):
     return True, (width, height)
 
 
-def probe_callback_per_frame(pad, info):
+def buffer_to_numpy(pad, info):
     logger.debug(f"probe id - {info.id}")
+
     buf = info.get_buffer()
     logger.debug(f"buffer pts - [{buf.pts / Gst.SECOND:6.2f} sec]")
+
     success, map_info = buf.map(Gst.MapFlags.READ)
 
     if not success:
@@ -40,10 +39,12 @@ def probe_callback_per_frame(pad, info):
     if not success:
         raise RuntimeError("Could not extract widht and height from pad caps!")
 
-    logger.info(f"Extracted buffer of shape (H / W) ({height} / {width})")
+    logger.debug(f"Extracted buffer of shape (H / W) ({height} / {width})")
+
     numpy_frame = np.ndarray(
         shape=(height, width, 4), dtype=np.uint8, buffer=map_info.data
     )
-    logger.info(f"Converted to numpy array of shape - {numpy_frame.shape}")
-
-    return Gst.PadProbeReturn.OK
+    result = numpy_frame[:, :, :3].copy()
+    logger.debug(f"Converted to numpy array of shape - {result.shape}")
+    buf.unmap(map_info)
+    return result

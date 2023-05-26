@@ -1,5 +1,9 @@
 import torch
+import os
 
+torch.backends.cudnn.enabled = False
+
+logs_dir = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/logs"
 ssd_model = torch.hub.load("NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd")
 utils = torch.hub.load(
     "NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd_processing_utils"
@@ -52,4 +56,4 @@ for image_idx in range(len(best_results_per_input)):
             ),
             bbox=dict(facecolor="white", alpha=0.5),
         )
-plt.show()
+plt.savefig(os.path.join(logs_dir, "ssd_inference_example.png"))

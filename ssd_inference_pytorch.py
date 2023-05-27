@@ -7,6 +7,7 @@ import torch
 from gi.repository import Gst  # pylint: disable=no-name-in-module
 import gi
 import numpy as np
+import nvtx
 
 from utils.gst_utils import buffer_to_numpy
 from utils.util import plt_results
@@ -20,6 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # global setting
+NUM_BUFFERS = 256
 VIDEOFORMAT = "RGBA"
 LOG_DIR = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/logs"
 SSD_THRESHOLD = 0.4
@@ -47,37 +49,45 @@ def preprocess(img: np.array) -> np.array:
     return img
 
 
+@nvtx.annotate("frame_probe", color="pink")
 def probe_callback_per_frame(pad: Gst.Pad, info: Gst.PadProbeInfo):
     """Callback for sink pad. It detects objects per frame."""
     global frames_processed  # pylint: disable=global-statement,invalid-name
 
-    img = buffer_to_numpy(pad, info)
-    img = preprocess(img)
-    # pylint: disable=no-member
-    input_tensor = torch.tensor(img, device=device, dtype=torch.float32)
-    # pylint: disable=logging-fstring-interpolation
-    logger.debug(
-        f"""Input tensor max : {input_tensor.max()}, min : {input_tensor.min()} 
-        and shape : {input_tensor.shape}"""
-    )
-    input_tensor = input_tensor.permute(2, 0, 1).unsqueeze(0)
+    with nvtx.annotate("preprocess buffer", color="green"):
+        img = buffer_to_numpy(pad, info)
+        img = preprocess(img)
+        # pylint: disable=no-member
+        input_tensor = torch.tensor(img, device=device, dtype=torch.float32)
+        # pylint: disable=logging-fstring-interpolation
+        logger.debug(
+            f"""Input tensor max : {input_tensor.max()}, min : {input_tensor.min()} 
+            and shape : {input_tensor.shape}"""
+        )
+        input_tensor = input_tensor.permute(2, 0, 1).unsqueeze(0)
 
     with torch.no_grad():
-        detections = ssd_model(input_tensor)
+        with nvtx.annotate("ssd forward", color="yellow"):
+            detections = ssd_model(input_tensor)
 
+    # pylint: disable=logging-fstring-interpolation
     logger.debug(
         f"Detections bbox : {detections[0].shape}, class : {detections[1].shape}"
     )
-    result = ssd_utils.decode_results(detections)
-    best_result = ssd_utils.pick_best(result[0], SSD_THRESHOLD)
+    with nvtx.annotate("post processing", color="purple"):
+        result = ssd_utils.decode_results(detections)
+        best_result = ssd_utils.pick_best(result[0], SSD_THRESHOLD)
 
     if (frames_processed + 1) % 50 == 0:
-        plt_results(
-            [best_result],
-            [img],
-            os.path.join(LOG_DIR, f"ssd_infer_pytorch_baseline_{frames_processed}.png"),
-            ssd_utils,
-        )
+        with nvtx.annotate("plot", color="blue"):
+            plt_results(
+                [best_result],
+                [img],
+                os.path.join(
+                    LOG_DIR, f"ssd_infer_pytorch_baseline_{frames_processed}.png"
+                ),
+                ssd_utils,
+            )
     frames_processed += 1
     return Gst.PadProbeReturn.OK
 
@@ -87,7 +97,7 @@ Gst.init(sys.argv[1:])
 
 # build the pipeline
 pipeline = Gst.parse_launch(
-    f"filesrc location=media/in.mp4 num-buffers=16 ! \
+    f"filesrc location=media/in.mp4 num-buffers={NUM_BUFFERS} ! \
      decodebin ! \
      nvvideoconvert ! \
      video/x-raw, format = {VIDEOFORMAT} ! \
@@ -102,12 +112,13 @@ fs = pipeline.get_by_name("fs")
 sink_pad = fs.get_static_pad("sink")
 sink_pad.add_probe(Gst.PadProbeType.BUFFER, probe_callback_per_frame)
 
-# wait until EOS or error
-bus = pipeline.get_bus()
 start_time = time.time()
-msg = bus.timed_pop_filtered(
-    Gst.CLOCK_TIME_NONE, Gst.MessageType.ERROR | Gst.MessageType.EOS
-)
+# wait until EOS or error
+with nvtx.annotate("video processing", color="red"):
+    bus = pipeline.get_bus()
+    msg = bus.timed_pop_filtered(
+        Gst.CLOCK_TIME_NONE, Gst.MessageType.ERROR | Gst.MessageType.EOS
+    )
 end_time = time.time()
 # Parse message
 if msg:

@@ -5,7 +5,7 @@ This is purely for learning purposes and reimplements most ideas from [Paul Brid
 
 ## Overview
 
-This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-baseline-pipeline) contains basic implementation of **SSD300** inference with **Gstreamer** library for video processing. Baseline speed is **4.17 FPS** without profiling overhead.
+This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-baseline-pipeline) contains basic implementation of **SSD300** inference with **Gstreamer** library for video processing. Baseline speed is **4.17 FPS (K80 GPU)** without profiling overhead.
 
 ## Code Walk
 

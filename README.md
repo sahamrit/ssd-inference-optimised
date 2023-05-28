@@ -5,7 +5,9 @@ This is purely for learning purposes and reimplements most ideas from [Paul Brid
 
 ## Overview
 
-This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-baseline-pipeline) contains basic implementation of **SSD300** inference with **Gstreamer** library for video processing. Baseline speed is **4.17 FPS (K80 GPU)** without profiling overhead.
+This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-inference-v1) contains basic implementation of **SSD300** inference with **Gstreamer** library for video processing. This is improvement over baseline (**4FPS**) and runs at **30FPS** on a **K80 machine**.
+
+**Changes introduced** are - preprocessing and postprocessing on GPU and sending frames in batches of 64.
 
 ## Code Walk
 
@@ -13,12 +15,14 @@ This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-b
 
 [ssd_inference_pytorch](./ssd_inference_pytorch.py) - Contains SSD inference code in the frame callback and hence does SSD inference per frame.
 
+[utils](./utils/) - Contains utilities related to SSD pre & post processing and some Gst utilities.
+
 [examples](./examples/) - contains a basic Gstreamer pipeline and SSD inference working and decoupled from each other.
 
 [input](./media/) - Contains input MP4 video for inference.
 ## Analysis
 
-[profiling_analysis](./profiling_analysis/) - Contains Nsys report of the current code version. [report1](./report1.nsys-rep) contains the complete report which can be viewed from NVIDIA Nsight.
+[profiling_analysis](./profiling_analysis/) - Contains analysis of all versions. All [nsys reports](./nsys_reports/) can be accessed here.
 
 [logs](./logs/) - contains logs related to object detection sample, gst pipeline diagrams etc.
 

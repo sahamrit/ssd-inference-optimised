@@ -4,13 +4,16 @@ import os
 import logging
 import time
 import torch
-from gi.repository import Gst  # pylint: disable=no-name-in-module
 import gi
 import numpy as np
 import nvtx
+import torchvision
+from gi.repository import Gst  # pylint: disable=no-name-in-module
+from torchvision import transforms
 
 from utils.gst_utils import buffer_to_numpy
 from utils.util import plt_results
+from utils.ssd import Encoder, dboxes300_coco
 
 torch.backends.cudnn.enabled = False
 gi.require_version("Gst", "1.0")
@@ -22,12 +25,18 @@ logger = logging.getLogger(__name__)
 
 # global setting
 NUM_BUFFERS = 256
+DISABLE_PLOTTING = False
+BATCH_SIZE = 64
+
 VIDEOFORMAT = "RGBA"
 LOG_DIR = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/logs"
-SSD_THRESHOLD = 0.4
+CONF_THRESHOLD = 0.4
+NMS_THRESHOLD = 0.45
+PLOT_INTERVAL = BATCH_SIZE if not DISABLE_PLOTTING else 100000
 
 # setup ssd eval
 frames_processed = 0  # pylint: disable=invalid-name
+input_batch_buffer = []
 device = "cuda" if torch.cuda.is_available() else "cpu"  # pylint: disable=invalid-name
 ssd_model = torch.hub.load("NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd")
 ssd_utils = torch.hub.load(
@@ -37,8 +46,48 @@ ssd_utils = torch.hub.load(
 ssd_model.to(device)
 ssd_model.eval()
 
+transform = transforms.Compose(
+    [
+        transforms.CenterCrop(300),
+        transforms.Normalize(127.5, 127.5),
+    ]
+)
 
-def preprocess(img: np.array) -> np.array:
+
+def postprocess(detections_batch):
+    """Input = Tuple [ ploc , pconf ].
+    ploc shape - [ bsz, 4, num_boxes ]
+    pconf shape - [bsz, 81, num_boxes ]
+
+    There are 81 classes and 8732 num_boxes
+    """
+    encoder = Encoder(dboxes300_coco())
+    bboxes, probs = encoder.scale_back_batch(detections_batch[0], detections_batch[1])
+    output = []
+    for bbox, prob in zip(bboxes.split(1, 0), probs.split(1, 0)):
+        bbox = bbox.squeeze(0)
+        prob = prob.squeeze(0)
+
+        label = torch.max(prob, dim=-1)  # pylint: disable=no-member
+        lbl = label.indices
+        score = label.values
+        mask = (score > CONF_THRESHOLD) & (lbl > 0)
+        bbox, lbl, score = bbox[mask, :], lbl[mask], score[mask]
+        max_ids = torchvision.ops.batched_nms(bbox, score, lbl, NMS_THRESHOLD)
+        output.append(
+            [bbox[max_ids, :].cpu(), lbl[max_ids].cpu(), score[max_ids].cpu()]
+        )
+    return output
+
+
+def preprocess(img: torch.Tensor) -> torch.Tensor:
+    """Preprocess image according to NVIDIA SSD -
+    https://github.com/NVIDIA/DeepLearningExamples/blob/master/PyTorch/Detection/SSD/dle/inference.py
+    """
+    return transform(img)
+
+
+def preprocess_img(img: np.array) -> np.array:
     """Preprocess image according to NVIDIA SSD -
     https://github.com/NVIDIA/DeepLearningExamples/blob/master/PyTorch/Detection/SSD/dle/inference.py
     """
@@ -52,19 +101,30 @@ def preprocess(img: np.array) -> np.array:
 @nvtx.annotate("frame_probe", color="pink")
 def probe_callback_per_frame(pad: Gst.Pad, info: Gst.PadProbeInfo):
     """Callback for sink pad. It detects objects per frame."""
-    global frames_processed  # pylint: disable=global-statement,invalid-name
-
-    with nvtx.annotate("preprocess buffer", color="green"):
+    global frames_processed, input_batch_buffer  # pylint: disable=global-statement,invalid-name
+    frames_processed += 1
+    with nvtx.annotate("buffer to numpy", color="green"):
         img = buffer_to_numpy(pad, info)
-        img = preprocess(img)
+
         # pylint: disable=no-member
-        input_tensor = torch.tensor(img, device=device, dtype=torch.float32)
-        # pylint: disable=logging-fstring-interpolation
-        logger.debug(
-            f"""Input tensor max : {input_tensor.max()}, min : {input_tensor.min()} 
-            and shape : {input_tensor.shape}"""
+        input_batch_buffer.append(
+            torch.tensor(img, dtype=torch.float32).permute(2, 0, 1)
         )
-        input_tensor = input_tensor.permute(2, 0, 1).unsqueeze(0)
+
+        if len(input_batch_buffer) < BATCH_SIZE:
+            return Gst.PadProbeReturn.OK
+
+    with nvtx.annotate("preprocess", color="green"):
+        # pylint: disable=no-member
+        input_tensor = torch.stack(input_batch_buffer).to(device)
+        input_tensor = preprocess(input_tensor)
+        input_batch_buffer = []
+
+        # # pylint: disable=logging-fstring-interpolation
+        logger.debug(
+            f"""Input tensor max : {input_tensor.max()}, min : {input_tensor.min()}
+            and shape : {input_tensor.shape} and device: {input_tensor.device}"""
+        )
 
     with torch.no_grad():
         with nvtx.annotate("ssd forward", color="yellow"):
@@ -75,20 +135,17 @@ def probe_callback_per_frame(pad: Gst.Pad, info: Gst.PadProbeInfo):
         f"Detections bbox : {detections[0].shape}, class : {detections[1].shape}"
     )
     with nvtx.annotate("post processing", color="purple"):
-        result = ssd_utils.decode_results(detections)
-        best_result = ssd_utils.pick_best(result[0], SSD_THRESHOLD)
+        best_results_per_input = postprocess(detections)
+        best_result = best_results_per_input[-1]
 
-    if (frames_processed + 1) % 50 == 0:
+    if (frames_processed) % PLOT_INTERVAL == 0:
         with nvtx.annotate("plot", color="blue"):
             plt_results(
                 [best_result],
-                [img],
-                os.path.join(
-                    LOG_DIR, f"ssd_infer_pytorch_baseline_{frames_processed}.png"
-                ),
+                [preprocess_img(img)],
+                os.path.join(LOG_DIR, f"ssd_infer_pytorch_{frames_processed}.png"),
                 ssd_utils,
             )
-    frames_processed += 1
     return Gst.PadProbeReturn.OK
 
 
@@ -132,7 +189,11 @@ if msg:
         )
     elif msg.type == Gst.MessageType.EOS:
         logger.info("End-Of-Stream reached.")
-        logger.info("FPS - %.2f", frames_processed / (end_time - start_time))
+        logger.info(
+            "FPS - %.2f, Total frames - {%d}",
+            frames_processed / (end_time - start_time),
+            frames_processed,
+        )
     else:
         # This should not happen as we only asked for ERRORs and EOS
         logger.error("Unexpected message received.")

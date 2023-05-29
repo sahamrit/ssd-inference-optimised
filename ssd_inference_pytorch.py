@@ -1,8 +1,11 @@
+# pylint: disable-all
 "Baseline inference of NVIDIA SSD300 in Pytorch"
 import sys
 import os
 import logging
 import time
+import threading
+import queue
 import torch
 import gi
 import numpy as np
@@ -15,7 +18,7 @@ from utils.gst_utils import buffer_to_numpy
 from utils.util import plt_results
 from utils.ssd import Encoder, dboxes300_coco
 
-torch.backends.cudnn.enabled = False
+# torch.backends.cudnn.enabled = False
 gi.require_version("Gst", "1.0")
 
 logging.basicConfig(
@@ -24,21 +27,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # global setting
-NUM_BUFFERS = 256
-DISABLE_PLOTTING = False
+NUM_BUFFERS = 1000
+DISABLE_PLOTTING = True
 BATCH_SIZE = 64
+NUM_THREADS = 2
 
 VIDEOFORMAT = "RGBA"
+MODEL_PRECISION = "fp32"
+MODEL_DTYPE = torch.float16 if MODEL_PRECISION == "fp16" else torch.float32
 LOG_DIR = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/logs"
 CONF_THRESHOLD = 0.4
 NMS_THRESHOLD = 0.45
-PLOT_INTERVAL = BATCH_SIZE if not DISABLE_PLOTTING else 100000
 
 # setup ssd eval
 frames_processed = 0  # pylint: disable=invalid-name
-input_batch_buffer = []
-device = "cuda" if torch.cuda.is_available() else "cpu"  # pylint: disable=invalid-name
-ssd_model = torch.hub.load("NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd")
+start_time = time.time()
+thread_queues = [queue.Queue(2 * BATCH_SIZE) for _ in range(NUM_THREADS)]
+threads = []
+device = (
+    "cuda:0" if torch.cuda.is_available() else "cpu"
+)  # pylint: disable=invalid-name
+ssd_model = torch.hub.load(
+    "NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd", model_math=MODEL_PRECISION
+)
 ssd_utils = torch.hub.load(
     "NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd_processing_utils"
 )
@@ -98,55 +109,81 @@ def preprocess_img(img: np.array) -> np.array:
     return img
 
 
+def inference_per_thread(thread_idx, image_queue: queue.Queue):
+    stream = torch.cuda.Stream(device)
+    input_batch_buffer = []
+    exit_flag = False
+    while True:
+        tensor, img, frame_id = image_queue.get()
+
+        if tensor is None:
+            exit_flag = True
+
+        if not exit_flag:
+            input_batch_buffer.append(tensor)
+            if len(input_batch_buffer) < BATCH_SIZE:
+                continue
+
+        if len(input_batch_buffer) == 0:
+            return
+        with torch.cuda.stream(stream):
+            with nvtx.annotate("preprocess", color="green"):
+                # pylint: disable=no-member
+                input_tensor = torch.stack(input_batch_buffer).to(device)
+                input_tensor = preprocess(input_tensor)
+                input_batch_buffer = []
+
+            # # pylint: disable=logging-fstring-interpolation
+            logger.debug(
+                f"""Input tensor max : {input_tensor.max()}, min : {input_tensor.min()}
+                and shape : {input_tensor.shape} and device: {input_tensor.device}"""
+            )
+
+            with torch.no_grad():
+                with nvtx.annotate("ssd forward", color="yellow"):
+                    detections = ssd_model(input_tensor)
+
+            # pylint: disable=logging-fstring-interpolation
+            logger.debug(
+                f"Detections bbox : {detections[0].shape}, class : {detections[1].shape}"
+            )
+            with nvtx.annotate("post processing", color="purple"):
+                best_results_per_input = postprocess(detections)
+                best_result = best_results_per_input[-1]
+
+        if frame_id and (not DISABLE_PLOTTING):
+            with nvtx.annotate("plot", color="blue"):
+                plt_results(
+                    [best_result],
+                    [preprocess_img(img)],
+                    os.path.join(LOG_DIR, f"ssd_infer_pytorch_{frame_id}.png"),
+                    ssd_utils,
+                )
+        if exit_flag:
+            return
+
+
 @nvtx.annotate("frame_probe", color="pink")
 def probe_callback_per_frame(pad: Gst.Pad, info: Gst.PadProbeInfo):
     """Callback for sink pad. It detects objects per frame."""
-    global frames_processed, input_batch_buffer  # pylint: disable=global-statement,invalid-name
+    global frames_processed, thread_queues, start_time  # pylint: disable=global-statement,invalid-name
     frames_processed += 1
     with nvtx.annotate("buffer to numpy", color="green"):
         img = buffer_to_numpy(pad, info)
 
         # pylint: disable=no-member
-        input_batch_buffer.append(
-            torch.tensor(img, dtype=torch.float32).permute(2, 0, 1)
-        )
-
-        if len(input_batch_buffer) < BATCH_SIZE:
-            return Gst.PadProbeReturn.OK
-
-    with nvtx.annotate("preprocess", color="green"):
-        # pylint: disable=no-member
-        input_tensor = torch.stack(input_batch_buffer).to(device)
-        input_tensor = preprocess(input_tensor)
-        input_batch_buffer = []
-
-        # # pylint: disable=logging-fstring-interpolation
-        logger.debug(
-            f"""Input tensor max : {input_tensor.max()}, min : {input_tensor.min()}
-            and shape : {input_tensor.shape} and device: {input_tensor.device}"""
-        )
-
-    with torch.no_grad():
-        with nvtx.annotate("ssd forward", color="yellow"):
-            detections = ssd_model(input_tensor)
-
-    # pylint: disable=logging-fstring-interpolation
-    logger.debug(
-        f"Detections bbox : {detections[0].shape}, class : {detections[1].shape}"
-    )
-    with nvtx.annotate("post processing", color="purple"):
-        best_results_per_input = postprocess(detections)
-        best_result = best_results_per_input[-1]
-
-    if (frames_processed) % PLOT_INTERVAL == 0:
-        with nvtx.annotate("plot", color="blue"):
-            plt_results(
-                [best_result],
-                [preprocess_img(img)],
-                os.path.join(LOG_DIR, f"ssd_infer_pytorch_{frames_processed}.png"),
-                ssd_utils,
+        thread_queues[frames_processed % NUM_THREADS].put(
+            (
+                torch.tensor(img, dtype=MODEL_DTYPE).permute(2, 0, 1),
+                img,  # for plotting
+                frames_processed,
             )
-    return Gst.PadProbeReturn.OK
+        )
+        logger.debug(
+            f"Thread Queue len - {thread_queues[frames_processed % NUM_THREADS].qsize()}. Frames - {frames_processed}"
+        )
+        start_time = time.time() if frames_processed == 1 else start_time
+        return Gst.PadProbeReturn.OK
 
 
 # initialize GStreamer
@@ -169,14 +206,20 @@ fs = pipeline.get_by_name("fs")
 sink_pad = fs.get_static_pad("sink")
 sink_pad.add_probe(Gst.PadProbeType.BUFFER, probe_callback_per_frame)
 
-start_time = time.time()
-# wait until EOS or error
-with nvtx.annotate("video processing", color="red"):
-    bus = pipeline.get_bus()
-    msg = bus.timed_pop_filtered(
-        Gst.CLOCK_TIME_NONE, Gst.MessageType.ERROR | Gst.MessageType.EOS
+for thread_idx in range(NUM_THREADS):
+    curr_thread = threading.Thread(
+        target=inference_per_thread, args=(thread_idx, thread_queues[thread_idx])
     )
-end_time = time.time()
+    curr_thread.start()
+    threads.append(curr_thread)
+
+# wait until EOS or error
+
+bus = pipeline.get_bus()
+msg = bus.timed_pop_filtered(
+    Gst.CLOCK_TIME_NONE, Gst.MessageType.ERROR | Gst.MessageType.EOS
+)
+
 # Parse message
 if msg:
     if msg.type == Gst.MessageType.ERROR:
@@ -189,6 +232,12 @@ if msg:
         )
     elif msg.type == Gst.MessageType.EOS:
         logger.info("End-Of-Stream reached.")
+
+        for tidx, t in enumerate(threads):
+            thread_queues[tidx].put((None, None, None))
+            t.join()
+
+        end_time = time.time()
         logger.info(
             "FPS - %.2f, Total frames - {%d}",
             frames_processed / (end_time - start_time),

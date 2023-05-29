@@ -18,7 +18,7 @@ from utils.gst_utils import buffer_to_numpy
 from utils.util import plt_results
 from utils.ssd import Encoder, dboxes300_coco
 
-torch.backends.cudnn.enabled = False
+# torch.backends.cudnn.enabled = False
 gi.require_version("Gst", "1.0")
 
 logging.basicConfig(
@@ -27,12 +27,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # global setting
-NUM_BUFFERS = 256
+NUM_BUFFERS = 1000
 DISABLE_PLOTTING = True
-BATCH_SIZE = 4
+BATCH_SIZE = 64
 NUM_THREADS = 2
 
 VIDEOFORMAT = "RGBA"
+MODEL_PRECISION = "fp32"
+MODEL_DTYPE = torch.float16 if MODEL_PRECISION == "fp16" else torch.float32
 LOG_DIR = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/logs"
 CONF_THRESHOLD = 0.4
 NMS_THRESHOLD = 0.45
@@ -45,7 +47,9 @@ threads = []
 device = (
     "cuda:0" if torch.cuda.is_available() else "cpu"
 )  # pylint: disable=invalid-name
-ssd_model = torch.hub.load("NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd")
+ssd_model = torch.hub.load(
+    "NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd", model_math=MODEL_PRECISION
+)
 ssd_utils = torch.hub.load(
     "NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd_processing_utils"
 )
@@ -170,7 +174,7 @@ def probe_callback_per_frame(pad: Gst.Pad, info: Gst.PadProbeInfo):
         # pylint: disable=no-member
         thread_queues[frames_processed % NUM_THREADS].put(
             (
-                torch.tensor(img, dtype=torch.float32).permute(2, 0, 1),
+                torch.tensor(img, dtype=MODEL_DTYPE).permute(2, 0, 1),
                 img,  # for plotting
                 frames_processed,
             )

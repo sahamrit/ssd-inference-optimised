@@ -26,9 +26,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # global setting
-NUM_BUFFERS = 64
+NUM_BUFFERS = 1000
 DISABLE_PLOTTING = True
-BATCH_SIZE = 16
+BATCH_SIZE = 64
 NUM_THREADS = 2
 
 VIDEOFORMAT = "RGBA"

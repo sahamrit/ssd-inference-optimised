@@ -33,9 +33,9 @@ BATCH_SIZE = 64
 NUM_THREADS = 2
 
 VIDEOFORMAT = "RGBA"
-MODEL_PRECISION = "fp32"
+MODEL_PRECISION = "fp16"
 MODEL_DTYPE = torch.float16 if MODEL_PRECISION == "fp16" else torch.float32
-LOG_DIR = "/home/azureuser/localfiles/Repo/ssd-inference-optimised/logs"
+LOG_DIR = "logs"
 CONF_THRESHOLD = 0.4
 NMS_THRESHOLD = 0.45
 
@@ -44,6 +44,7 @@ frames_processed = 0  # pylint: disable=invalid-name
 start_time = time.time()
 thread_queues = [queue.Queue(2 * BATCH_SIZE) for _ in range(NUM_THREADS)]
 threads = []
+lock = threading.Lock()
 device = (
     "cuda:0" if torch.cuda.is_available() else "cpu"
 )  # pylint: disable=invalid-name
@@ -150,17 +151,19 @@ def inference_per_thread(thread_idx, image_queue: queue.Queue):
             with nvtx.annotate("post processing", color="purple"):
                 best_results_per_input = postprocess(detections)
                 best_result = best_results_per_input[-1]
-
-        if frame_id and (not DISABLE_PLOTTING):
-            with nvtx.annotate("plot", color="blue"):
-                plt_results(
-                    [best_result],
-                    [preprocess_img(img)],
-                    os.path.join(LOG_DIR, f"ssd_infer_pytorch_{frame_id}.png"),
-                    ssd_utils,
-                )
         if exit_flag:
             return
+        
+        if frame_id  and (not DISABLE_PLOTTING):
+            with lock:
+                with nvtx.annotate("plot", color="blue"):
+                    plt_results(
+                        [best_result],
+                        [preprocess_img(img)],
+                        os.path.join(LOG_DIR, f"ssd_infer_pytorch_{frame_id}.png"),
+                        ssd_utils,
+                    )
+
 
 
 @nvtx.annotate("frame_probe", color="pink")

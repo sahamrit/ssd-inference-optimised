@@ -1,4 +1,3 @@
-# pylint: disable-all
 "Baseline inference of NVIDIA SSD300 in Pytorch"
 import sys
 import os
@@ -14,7 +13,7 @@ import torchvision
 from gi.repository import Gst  # pylint: disable=no-name-in-module
 from torchvision import transforms
 
-from utils.gst_utils import buffer_to_numpy
+from utils.gst_utils import buffer_to_image_tensor
 from utils.util import plt_results
 from utils.ssd import Encoder, dboxes300_coco
 
@@ -34,8 +33,11 @@ NUM_THREADS = 2
 
 VIDEOFORMAT = "RGBA"
 MODEL_PRECISION = "fp16"
+
+# pylint: disable=no-member
 MODEL_DTYPE = torch.float16 if MODEL_PRECISION == "fp16" else torch.float32
 LOG_DIR = "logs"
+GST_PIPELINE_DUMP = "ssd_inference_pytorch_ds_pipeline.dot"
 CONF_THRESHOLD = 0.4
 NMS_THRESHOLD = 0.45
 
@@ -45,9 +47,9 @@ start_time = time.time()
 thread_queues = [queue.Queue(2 * BATCH_SIZE) for _ in range(NUM_THREADS)]
 threads = []
 lock = threading.Lock()
-device = (
-    "cuda:0" if torch.cuda.is_available() else "cpu"
-)  # pylint: disable=invalid-name
+
+# pylint: disable=invalid-name
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
 ssd_model = torch.hub.load(
     "NVIDIA/DeepLearningExamples:torchhub", "nvidia_ssd", model_math=MODEL_PRECISION
 )
@@ -75,20 +77,56 @@ def postprocess(detections_batch):
     """
     encoder = Encoder(dboxes300_coco())
     bboxes, probs = encoder.scale_back_batch(detections_batch[0], detections_batch[1])
-    output = []
-    for bbox, prob in zip(bboxes.split(1, 0), probs.split(1, 0)):
-        bbox = bbox.squeeze(0)
-        prob = prob.squeeze(0)
+    # bboxes = [bsz, num_boxes, 4] , probs = [bsz, num_boxes, 81]
 
-        label = torch.max(prob, dim=-1)  # pylint: disable=no-member
-        lbl = label.indices
-        score = label.values
-        mask = (score > CONF_THRESHOLD) & (lbl > 0)
-        bbox, lbl, score = bbox[mask, :], lbl[mask], score[mask]
-        max_ids = torchvision.ops.batched_nms(bbox, score, lbl, NMS_THRESHOLD)
-        output.append(
-            [bbox[max_ids, :].cpu(), lbl[max_ids].cpu(), score[max_ids].cpu()]
-        )
+    (bsz, num_boxes, num_classes) = probs.shape
+    (score, lbl) = torch.max(probs, dim=-1)
+    # score = [bsz, num_boxes] , lbl = [bsz, num_boxes]
+
+    image_idx = torch.arange(
+        bsz, dtype=probs.dtype, device=probs.device
+    ).repeat_interleave(num_boxes)
+    # [0, 0, 1, 1, 2, 2, 3, 3] assume num_boxes = 2 and bsz = 4 and num_classes = 81
+
+    offset = image_idx * num_classes
+    # [0, 0, 81, 81, 162, 162, 243, 243]
+
+    flat_lbl = lbl.view(-1)
+    flat_score = score.view(-1)
+    # lbl = [0, 80, 80, 80, 0, 0, 80, 0] assume num_classes = 81
+    flat_bbox = bboxes.reshape(-1, 4)
+
+    encode_lbl = flat_lbl + offset
+    # [0, 80, 161, 161, 162, 162, 323, 243]
+    # for decoding
+    # lbl (% num_classes) [0, 80, 80, 80, 0, 0, 80, 0]
+    # batch (//num_classes) [0, 1, 1, 1, 2, 2, 3, 3]
+
+    conf_mask = (flat_score > CONF_THRESHOLD) & (flat_lbl > 0)
+    flat_bbox, flat_score, encode_lbl = (
+        flat_bbox[conf_mask, :],
+        flat_score[conf_mask],
+        encode_lbl[conf_mask],
+    )
+
+    nms_mask = torchvision.ops.batched_nms(
+        flat_bbox, flat_score, encode_lbl, NMS_THRESHOLD
+    )
+
+    flat_bbox, encode_lbl, flat_score = (
+        flat_bbox[nms_mask, :].cpu(),
+        encode_lbl[nms_mask].cpu(),
+        flat_score[nms_mask].cpu(),
+    )
+
+    output = [[[], [], []] for _ in range(bsz)]
+    for bbox, lbl, score in zip(flat_bbox, encode_lbl, flat_score):
+        decode_lbl = int(lbl) % num_classes
+        decode_img_id = int(lbl) // num_classes
+        output[decode_img_id][0].append(bbox)
+        output[decode_img_id][1].append(decode_lbl)
+        output[decode_img_id][2].append(score)
+
     return output
 
 
@@ -110,12 +148,15 @@ def preprocess_img(img: np.array) -> np.array:
     return img
 
 
-def inference_per_thread(thread_idx, image_queue: queue.Queue):
+# pylint: disable=unused-argument
+def inference_per_thread(thread_id, image_queue: queue.Queue):
+    """Per thread reads its own queue and batches it till batch size.
+    Then inference is done per batch."""
     stream = torch.cuda.Stream(device)
     input_batch_buffer = []
     exit_flag = False
     while True:
-        tensor, img, frame_id = image_queue.get()
+        tensor, frame_id = image_queue.get()
 
         if tensor is None:
             exit_flag = True
@@ -134,7 +175,7 @@ def inference_per_thread(thread_idx, image_queue: queue.Queue):
                 input_tensor = preprocess(input_tensor)
                 input_batch_buffer = []
 
-            # # pylint: disable=logging-fstring-interpolation
+            # pylint: disable=logging-fstring-interpolation
             logger.debug(
                 f"""Input tensor max : {input_tensor.max()}, min : {input_tensor.min()}
                 and shape : {input_tensor.shape} and device: {input_tensor.device}"""
@@ -153,9 +194,10 @@ def inference_per_thread(thread_idx, image_queue: queue.Queue):
                 best_result = best_results_per_input[-1]
         if exit_flag:
             return
-        
-        if frame_id  and (not DISABLE_PLOTTING):
+
+        if frame_id and (not DISABLE_PLOTTING):
             with lock:
+                img = tensor.permute(1, 2, 0).to(torch.uint8).cpu().numpy()
                 with nvtx.annotate("plot", color="blue"):
                     plt_results(
                         [best_result],
@@ -165,23 +207,25 @@ def inference_per_thread(thread_idx, image_queue: queue.Queue):
                     )
 
 
-
 @nvtx.annotate("frame_probe", color="pink")
 def probe_callback_per_frame(pad: Gst.Pad, info: Gst.PadProbeInfo):
     """Callback for sink pad. It detects objects per frame."""
-    global frames_processed, thread_queues, start_time  # pylint: disable=global-statement,invalid-name
+    # pylint: disable=global-statement,invalid-name,global-variable-not-assigned
+    global frames_processed, thread_queues, start_time
     frames_processed += 1
-    with nvtx.annotate("buffer to numpy", color="green"):
-        img = buffer_to_numpy(pad, info)
+    with nvtx.annotate("buffer_to_image_tensor", color="green"):
+        img_tensor = buffer_to_image_tensor(pad, info, device)
+
+        img_tensor = img_tensor.to(MODEL_DTYPE).permute(2, 0, 1)
 
         # pylint: disable=no-member
         thread_queues[frames_processed % NUM_THREADS].put(
             (
-                torch.tensor(img, dtype=MODEL_DTYPE).permute(2, 0, 1),
-                img,  # for plotting
+                img_tensor,
                 frames_processed,
             )
         )
+        # pylint: disable=logging-fstring-interpolation,line-too-long
         logger.debug(
             f"Thread Queue len - {thread_queues[frames_processed % NUM_THREADS].qsize()}. Frames - {frames_processed}"
         )
@@ -197,7 +241,7 @@ pipeline = Gst.parse_launch(
     f"filesrc location=media/in.mp4 num-buffers={NUM_BUFFERS} ! \
      decodebin ! \
      nvvideoconvert ! \
-     video/x-raw, format = {VIDEOFORMAT} ! \
+     video/x-raw(memory:NVMM) , format = {VIDEOFORMAT} ! \
      fakesink name=fs"
 )
 
@@ -237,7 +281,7 @@ if msg:
         logger.info("End-Of-Stream reached.")
 
         for tidx, t in enumerate(threads):
-            thread_queues[tidx].put((None, None, None))
+            thread_queues[tidx].put((None, None))
             t.join()
 
         end_time = time.time()
@@ -250,7 +294,7 @@ if msg:
         # This should not happen as we only asked for ERRORs and EOS
         logger.error("Unexpected message received.")
 with open(
-    os.path.join(LOG_DIR, "ssd_inference_pytorch_gst_pipeline.dot"),
+    os.path.join(LOG_DIR, GST_PIPELINE_DUMP),
     "w",
     encoding="utf-8",
 ) as f:

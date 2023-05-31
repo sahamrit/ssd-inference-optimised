@@ -5,7 +5,8 @@ from typing import *  # pylint: disable=wildcard-import,unused-wildcard-import
 from gi.repository import Gst  # pylint: disable=E0611
 
 import gi
-import numpy as np
+import torch
+from utils import nvds
 
 gi.require_version("Gst", "1.0")
 logger = logging.getLogger(__name__)
@@ -26,29 +27,42 @@ def get_buffer_size(caps: Gst.Caps) -> Tuple[bool, Tuple[int, int]]:
     return True, (width, height)
 
 
-def buffer_to_numpy(pad: Gst.Pad, info: Gst.PadProbeInfo) -> np.array:
-    """Convert Gst.Buf to Numpy Array"""
-
+def buffer_to_image_tensor(pad, info, device):
+    """Converts buffer to tensor. The map_info of Gst.Buffer when
+    using deepstream follows NvBufSurface structure. Hence to
+    deserialise the string we need python-c++ binding (see nvds)"""
     buf = info.get_buffer()
-    logger.debug("buffer pts - [%6.2f sec]", buf.pts / Gst.SECOND)
 
-    success, map_info = buf.map(Gst.MapFlags.READ)
-
-    if not success:
+    _, (width, height) = get_buffer_size(pad.get_current_caps())
+    is_mapped, map_info = buf.map(Gst.MapFlags.READ)
+    if not is_mapped:
         raise RuntimeError("Could not map buffer data!")
-    success, (width, height) = get_buffer_size(pad.get_current_caps())
+    if is_mapped:
+        try:
+            source_surface = nvds.NvBufSurface(map_info)
+            torch_surface = nvds.NvBufSurface(map_info)
+            # pylint: disable=no-member
+            dest_tensor = torch.zeros(
+                (
+                    height,
+                    width,
+                    4,
+                ),
+                dtype=torch.uint8,
+                device=device,
+            )
 
-    if not success:
-        raise RuntimeError("Could not extract widht and height from pad caps!")
-    logger.debug("Extracted buffer of shape (H / W) (%d / %d)", height, width)
+            torch_surface.struct_copy_from(source_surface)
+            assert source_surface.numFilled == 1
+            assert source_surface.surfaceList[0].colorFormat == 19  # RGBA
 
-    numpy_frame = np.ndarray(
-        shape=(height, width, 4), dtype=np.uint8, buffer=map_info.data
-    )
-    result = numpy_frame[:, :, :3].copy()
+            # make torch_surface map to dest_tensor memory
+            torch_surface.surfaceList[0].dataPtr = dest_tensor.data_ptr()
 
-    # pylint: disable=W1203
-    logger.debug(f"Converted to numpy array of shape - {result.shape}")
+            # copy decoded GPU buffer (source_surface) into
+            # Pytorch tensor (torch_surface -> dest_tensor)
+            torch_surface.mem_copy_from(source_surface)
+        finally:
+            buf.unmap(map_info)
 
-    buf.unmap(map_info)
-    return result
+        return dest_tensor[:, :, :3]

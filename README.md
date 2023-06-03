@@ -5,30 +5,56 @@ This is purely for learning purposes and reimplements most ideas from [Paul Brid
 
 ## Overview
 
-This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-inference-v1) contains basic implementation of **SSD300** inference with **Gstreamer** library for video processing. This is improvement over baseline (**4FPS**) and runs at **30FPS** on a **K80 machine**.
+This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-inference-v2) contains  implementation of **SSD300** inference with **Deepstream** library for video processing. This is improvement over [version1](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-inference-v1) (**80FPS**) and runs at **196FPS** on a **V100 machine**.
 
-**Changes introduced** are - preprocessing and postprocessing on GPU and sending frames in batches of 64.
+**Changes introduced** 
+1. Concurrency with two python threads. Each python thread submits kernels to its own CUDA stream.
+2. Half precision inference.
 
 ## Code Walk
 
-[gst_frame_probe.py](./gst_frame_probe.py) - Contains basic Gstreamer pipeline with probe on sink pad. The probe is of type buffer and hence the callback is at frame level. The callback converts buffer to np array. This is to test working on basic Gstreamer pipeline.
+[gst_frame_probe.py](./gst_frame_probe.py) - Contains basic Gstreamer pipeline with probe on sink pad. The probe is of type buffer and hence the callback is at frame level. The callback converts buffer to np array. **This is to test working on basic Gstreamer pipeline.**
 
-[ssd_inference_pytorch](./ssd_inference_pytorch.py) - Contains SSD inference code in the frame callback and hence does SSD inference per frame.
+[ssd_inference_pytorch](./ssd_inference_pytorch.py) - Contains SSD inference code. This version introduces concurrency and half precision inference.
 
 [utils](./utils/) - Contains utilities related to SSD pre & post processing and some Gst utilities.
 
-[examples](./examples/) - contains a basic Gstreamer pipeline and SSD inference working and decoupled from each other.
+[examples](./examples/) - Contains a basic Gstreamer pipeline and SSD inference working and decoupled from each other.
 
 [input](./media/) - Contains input MP4 video for inference.
 ## Analysis
 
-[profiling_analysis](./profiling_analysis/) - Contains analysis of all versions. All [nsys reports](./nsys_reports/) can be accessed here.
+[profiling_analysis](./profiling_analysis/) - Contains profiling analysis of current code version.
 
 [logs](./logs/) - contains logs related to object detection sample, gst pipeline diagrams etc.
 
 ## Environment Setup
 
-TODO
+
+Build image corresponding to [Dockerfile](./Dockerfile). 
+```
+docker build -t <image_name>:<tag> <path_to_Dockerfile>
+``` 
+Run container from the image built.
+```
+sudo nvidia-docker run -it --privileged --network=host --pid=host --gpus all -v /home/azureuser/cloudfiles:/mnt <image_id> /bin/bash
+```
+Add following commands to **.bashrc**
+```
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libffi.so.7
+
+export LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream-6.1/lib/:$LD_LIBRARY_PATH
+```
+Commands
+```
+python ssd_inference_pytorch.py 
+
+## Run it from within docker
+## Try changing input media/in.mp4
+```
+**Additional Tip** - You can access Vscode features like Intellisense, if you open the project from within container. Checkout [Developing within Vscode tutorial](https://code.visualstudio.com/docs/devcontainers/containers) from their official documentation. 
+
+
 
 
 

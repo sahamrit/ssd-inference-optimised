@@ -5,7 +5,7 @@ This is purely for learning purposes and reimplements most ideas from [Paul Brid
 
 ## Overview
 
-This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-baseline-pipeline) contains basic implementation of **SSD300** inference with **Gstreamer** library for video processing. Baseline speed is **4.17 FPS (K80 GPU)** without profiling overhead.
+This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-baseline-pipeline) contains basic implementation of **SSD300** inference with **Gstreamer** library for video processing. Baseline speed is **6 FPS (V100 GPU)** without profiling overhead.
 
 ## Code Walk
 
@@ -18,13 +18,34 @@ This [branch](https://github.com/sahamrit/ssd-inference-optimised/tree/pytorch-b
 [input](./media/) - Contains input MP4 video for inference.
 ## Analysis
 
-[profiling_analysis](./profiling_analysis/) - Contains Nsys report of the current code version. [report1](./report1.nsys-rep) contains the complete report which can be viewed from NVIDIA Nsight.
+[profiling_analysis](./profiling_analysis/) - Contains Nsys report of the current code version.
 
 [logs](./logs/) - contains logs related to object detection sample, gst pipeline diagrams etc.
 
 ## Environment Setup
 
-TODO
+Build image corresponding to [Dockerfile](./Dockerfile). 
+```
+docker build -t <image_name>:<tag> <path_to_Dockerfile>
+``` 
+Run container from the image built.
+```
+sudo nvidia-docker run -it --privileged --network=host --pid=host --gpus all -v /home/azureuser/cloudfiles:/mnt <image_id> /bin/bash
+```
+Add following commands to **.bashrc**
+```
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libffi.so.7
+
+export LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream-6.1/lib/:$LD_LIBRARY_PATH
+```
+Commands
+```
+python ssd_inference_pytorch.py 
+
+## Run it from within docker
+## Try changing input media/in.mp4
+```
+**Additional Tip** - You can access Vscode features like Intellisense, if you open the project from within container. Checkout [Developing within Vscode tutorial](https://code.visualstudio.com/docs/devcontainers/containers) from their official documentation. 
 
 
 
